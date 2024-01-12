@@ -12,4 +12,12 @@ mio = { version = "0.8.10",features = ["default"] }
 log = "0.4.20"
 tracing = { version = "0.1.40",features = ["log"] }
 tracing-subscriber = "0.3"
-
+futures = "0.3.30"
+roaring = "0.10.2"
+hyper = { version = "1.1.0",features = ["client","http1","server"] }
+http-body-util = "0.1"
+hyper-util = { version = "0.1", features = ["full"] }
+bytes = "1.5.0"
+rand="0.8.5"
+num_cpus = "1.16.0"
+trait-variant = "0.1.2"
