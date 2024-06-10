@@ -1,9 +1,10 @@
 use bytes::Bytes;
 use http_body_util::Empty;
-use std::sync::{Arc};
+use std::io::stdout;
+use std::sync::Arc;
 use std::thread;
 
-use wrk::transport_layer::processor::{HttpHandle};
+use wrk::transport_layer::processor::Http1Handle;
 use wrk::transport_layer::transport::TcpSteamMaker;
 use wrk::transport_layer::Pressure;
 
@@ -24,16 +25,15 @@ fn main() {
 
     let cpus = num_cpus::get();
     let mut ht = None;
-    for i in 0..cpus - 1 {
+    for _ in 0..cpus - 1 {
         let n_rt = rt.clone();
         ht = Some(thread::spawn(|| {
             let transport_conn = TcpSteamMaker::new("127.0.0.1:8080");
             let processor =
-                HttpHandle::new("http://127.0.0.1:8080", Empty::<Bytes>::new()).unwrap();
+                Http1Handle::new("http://127.0.0.1:8080", Empty::<Bytes>::new()).unwrap();
             let pressure = Pressure::new(n_rt, transport_conn, processor, None);
-            pressure.run();
+            pressure.run(Box::new(stdout()));
         }));
     }
-    ht.unwrap().join();
-
+    let _ = ht.unwrap().join();
 }

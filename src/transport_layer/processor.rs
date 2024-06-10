@@ -1,18 +1,15 @@
+use super::odd::{Empty, WarpConn};
 use crate::transport_layer::Processor;
+use anyhow::anyhow;
 use hyper::body::Body;
 use hyper::client::conn::http1 as client_http1;
 use hyper::{Request, Uri};
 use hyper_util::rt::TokioIo;
 use std::cell::RefCell;
 use std::error::Error;
-use std::io;
-use std::io::IoSlice;
-use std::ops::DerefMut;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll};
-use anyhow::anyhow;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use std::fmt::{Debug, Display, Formatter};
+use std::rc::Rc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::select;
 use tracing::debug;
@@ -31,8 +28,9 @@ impl Echo {
     }
 }
 
-impl Processor<TcpStream> for Echo {
-    async fn turn(&self, conn: Arc<RefCell<TcpStream>>) -> anyhow::Result<()> {
+impl Processor<TcpStream, Empty> for Echo {
+    #[allow(clippy::await_holding_refcell_ref)]
+    async fn turn(&self, conn: Rc<RefCell<TcpStream>>) -> anyhow::Result<Empty> {
         debug!("run turn");
         let mut conn_mut = conn.borrow_mut();
         conn_mut.write_all(b"hello").await?;
@@ -45,95 +43,64 @@ impl Processor<TcpStream> for Echo {
             "get result {}",
             String::from_utf8(buf.into_iter().take(num).collect()).unwrap()
         );
-        Ok(())
+        Ok(Empty)
     }
 }
 
-pub struct HttpHandle<T> {
+pub struct Http1Handle<T> {
     //uri:String,
     request: Request<T>,
 }
 
-impl<T: Clone + Body> HttpHandle<T> {
+impl<T: Clone + Body> Http1Handle<T> {
     pub fn new<S: ToString>(uri: S, body: T) -> anyhow::Result<Self> {
         let uri_string = uri.to_string();
         let uri_ = Uri::try_from(uri_string)?;
-        let host=uri_.host().ok_or_else(||{anyhow!("can't parse host")})?.to_string();
+        let host = uri_
+            .host()
+            .ok_or_else(|| anyhow!("can't parse host"))?
+            .to_string();
         Ok(Self {
-            request: Request::builder().uri(uri_).header("Host",host).body(body)?,
+            request: Request::builder()
+                .uri(uri_)
+                .header("Host", host)
+                .body(body)?,
         })
     }
 }
 
-struct WarpConn(Arc<RefCell<TcpStream>>);
-
-unsafe impl Send for WarpConn {}
-
-macro_rules! pinc {
-    ($self:ident) => {
-        Pin::new($self.get_mut().0.borrow_mut().deref_mut())
-    };
+#[derive(Debug, Default)]
+pub struct H1Detail {
+    pub http_code: u16,
 }
-impl AsyncRead for WarpConn {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        pinc!(self).poll_read(cx, buf)
+
+impl Display for H1Detail {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        Debug::fmt(self, f)
     }
 }
 
-impl AsyncWrite for WarpConn {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        pinc!(self).poll_write(cx, buf)
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        pinc!(self).poll_flush(cx)
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        pinc!(self).poll_shutdown(cx)
-    }
-
-    fn poll_write_vectored(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        bufs: &[IoSlice<'_>],
-    ) -> Poll<io::Result<usize>> {
-        pinc!(self).poll_write_vectored(cx, bufs)
-    }
-
-    fn is_write_vectored(&self) -> bool {
-        self.0.borrow().is_write_vectored()
-    }
-}
-
-impl<T> Processor<TcpStream> for HttpHandle<T>
+// TODO: 扩展processor，让Pressure负责conn的pull
+impl<T> Processor<TcpStream, H1Detail> for Http1Handle<T>
 where
     T: Clone + Body + 'static,
     <T as Body>::Data: Send,
     <T as Body>::Error: Error + Send + Sync,
 {
-    async fn turn(&self, conn: Arc<RefCell<TcpStream>>) -> anyhow::Result<()> {
+    async fn turn(&self, conn: Rc<RefCell<TcpStream>>) -> anyhow::Result<H1Detail> {
         let tokio_io = TokioIo::new(WarpConn(conn));
         let (mut request_sender, connection) = client_http1::handshake(tokio_io).await.unwrap();
         let req = self.request.clone();
 
         select! {
+            // 理论来说connection不会await成功，只有Shutdown和upgrade会返回
             conn_err=connection=>{
-                Ok(conn_err?)
+                conn_err?;
+                Err(anyhow!("shutdown or upgrade"))
             }
             response=request_sender.send_request(req)=>{
-                if response?.status()!=200{
-                    // TODO:
-                }
-                Ok(())
+                // TODO: body 是income类型，会不会污染后续从conn读
+                Ok(H1Detail{http_code:response?.status().into()})
            }
         }
     }
@@ -141,31 +108,27 @@ where
 
 #[cfg(test)]
 pub mod test {
-    
+
+    use crate::transport_layer::processor::{Http1Handle};
+    use crate::transport_layer::Processor;
     use http_body_util::{BodyExt, Empty, Full};
-    use hyper::body::{Bytes};
+    use hyper::body::Bytes;
     use hyper::service::service_fn;
     use hyper::{client::conn::http1 as client_http1, server::conn::http1 as server_http1};
     use hyper::{Request, Response};
     use hyper_util::rt::TokioIo;
     use std::cell::RefCell;
     use std::convert::Infallible;
-    
-    
-    use std::sync::Arc;
+    use std::rc::Rc;
 
-    use crate::transport_layer::processor::{HttpHandle, WarpConn};
-    use crate::transport_layer::Processor;
-    
-    use tokio::net::{TcpListener, TcpStream};
-    use tokio::{spawn};
+    use crate::transport_layer::odd::WarpConn;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::spawn;
     use tracing::debug;
-
 
     #[tokio::test]
     async fn http_conn() {
-
         let stream = TcpStream::connect("127.0.0.1:8080").await.unwrap();
         //let (mut request_sender, connection) = client_http1::handshake(TokioIo::new(stream)).await.unwrap();
         // spawn(async move {
@@ -173,11 +136,11 @@ pub mod test {
         //         eprintln!("Error in connection: {}", e);
         //     }
         // });
-        let http_handle = HttpHandle::new("http://127.0.0.1:8080", Empty::<Bytes>::new()).unwrap();
-        http_handle
-            .turn(Arc::new(RefCell::new(stream)))
+        let http_handle = Http1Handle::new("http://127.0.0.1:8080", Empty::<Bytes>::new()).unwrap();
+        let _ = http_handle
+            .turn(Rc::new(RefCell::new(stream)))
             .await
-            .unwrap()
+            .unwrap();
 
         //let response = request_sender.send_request(request).await.unwrap();
         // assert_eq!(response.status(), StatusCode::OK);
@@ -193,9 +156,8 @@ pub mod test {
 
     #[tokio::test]
     async fn tokio() {
-
         let stream = TcpStream::connect("127.0.0.1:8080").await.unwrap();
-        let c = Arc::new(RefCell::new(stream));
+        let c = Rc::new(RefCell::new(stream));
         let wc = WarpConn(c);
         let (mut request_sender, connection) =
             client_http1::handshake(TokioIo::new(wc)).await.unwrap();
@@ -206,7 +168,7 @@ pub mod test {
         });
         let request = Request::builder()
             .uri("http://127.0.0.1:8080")
-            .header("Host","127.0.0.1")
+            .header("Host", "127.0.0.1")
             .body(Empty::<Bytes>::new())
             .unwrap();
         let response = request_sender.send_request(request).await.unwrap();

@@ -1,0 +1,43 @@
+name: CICD
+
+
+env:
+  RUST_SRV: "1.78.0"
+
+on:
+  pull_request:
+    branches:
+      - "**"
+  push:
+    branches: [ main ]
+
+jobs:
+  style:
+    name: Style
+    runs-on: ubuntu-latest
+#    runs-on: ${{ matrix.job.os }}
+#    strategy:
+#      fail-fast: false
+#      matrix:
+#        job: [ { os: ubuntu-latest }, { os: macos-latest }, { os: windows-latest } ]
+    steps:
+      - uses: actions/checkout@v1
+      - name: Install `rust` toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ env.RUST_SRV }}
+          override: true
+          profile: minimal # minimal component installation (ie, no documentation)
+          components: rustfmt, clippy
+      - name: "`fmt` testing"
+        uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: --all -- --check
+      - name: "`clippy` testing"
+        if: success() || failure() # run regardless of prior step ("`fmt` testing") success/failure
+        uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          args: --tests -- -D warnings
+

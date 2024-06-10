@@ -1,11 +1,13 @@
 use anyhow::Result;
-use futures::task::ArcWake;
+use odd::Wk;
 use roaring::RoaringBitmap;
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
+use std::fmt::Display;
 use std::future::Future;
+use std::io::Write;
 use std::marker::PhantomData;
-use std::sync::atomic::AtomicBool;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -13,6 +15,7 @@ use tokio::net::TcpStream;
 use tokio::runtime::Runtime;
 use tracing::{debug, info};
 
+pub mod odd;
 pub mod processor;
 pub mod transport;
 
@@ -26,47 +29,31 @@ pub trait TransportConn<T: Conn> {
 }
 
 #[trait_variant::make]
-pub trait Processor<T: Conn> {
-    async fn turn(&self, conn: Arc<RefCell<T>>) -> Result<()>;
+pub trait Processor<C: Conn, S: Display> {
+    async fn turn(&self, conn: Rc<RefCell<C>>) -> Result<S>;
 }
 
-pub struct Pressure<T, P, C>
+pub struct Pressure<T, P, C, S>
 where
     C: Conn,
+    S: Display,
     T: TransportConn<C>,
-    P: Processor<C>,
+    P: Processor<C, S>,
 {
     rt: Arc<Runtime>,
     transport: T,
     processor: P,
     max: u32,
-    stop: AtomicBool,
-    phantom: PhantomData<C>,
+    conn: PhantomData<C>,
+    status: PhantomData<S>,
 }
 
-struct Wk {
-    bitmap: Arc<Mutex<RoaringBitmap>>,
-    index: u32,
-}
-
-impl Wk {
-    fn new(bitmap: Arc<Mutex<RoaringBitmap>>, index: u32) -> Self {
-        Self { bitmap, index }
-    }
-}
-
-impl ArcWake for Wk {
-    fn wake_by_ref(arc_self: &Arc<Self>) {
-        debug!("been call wake {}", arc_self.index);
-        arc_self.bitmap.lock().unwrap().insert(arc_self.index);
-    }
-}
-
-impl<T, P, C> Pressure<T, P, C>
+impl<T, P, C, S> Pressure<T, P, C, S>
 where
     C: Conn,
+    S: Display,
     T: TransportConn<C>,
-    P: Processor<C>,
+    P: Processor<C, S>,
 {
     pub fn new(rt: Arc<Runtime>, transport: T, processor: P, max: Option<u32>) -> Self {
         Self {
@@ -74,11 +61,12 @@ where
             transport,
             processor,
             max: max.unwrap_or(65535),
-            stop: AtomicBool::new(false),
-            phantom: Default::default(),
+            conn: Default::default(),
+            status: Default::default(),
         }
     }
-    pub fn run(self) {
+
+    pub fn run(self, _collect: Box<dyn Write>) {
         let mut connections = HashMap::new();
         let mut pinned_futures = HashMap::new();
         let mut wake_run = HashMap::new();
@@ -96,7 +84,7 @@ where
                             let seq = *un_use_seq.iter().next().unwrap();
                             un_use_seq.take(&seq);
                             bitmap.lock().unwrap().insert(seq);
-                            connections.insert(seq, Arc::new(RefCell::new(conn)));
+                            connections.insert(seq, Rc::new(RefCell::new(conn)));
                             wake_run.insert(
                                 seq,
                                 futures::task::waker(Arc::new(Wk::new(bitmap.clone(), seq))),
@@ -142,11 +130,6 @@ where
                             }
                             None => {
                                 debug!("new pinned {seq}");
-                                // let conn = unsafe{
-                                //     let conn=connections.get(&seq).unwrap();
-                                //     #[allow(invalid_reference_casting)]
-                                //     &mut *(conn as *const C as *mut C)
-                                // };
                                 let conn = connections.get(&seq).unwrap().clone();
                                 let pinned_owner = Box::pin(self.processor.turn(conn));
                                 pinned_futures.insert(seq, pinned_owner);
@@ -186,7 +169,7 @@ where
 
 #[cfg(test)]
 mod test {
-    use crate::transport_layer::processor::{test::http_server, Echo, HttpHandle};
+    use crate::transport_layer::processor::{test::http_server, Echo, Http1Handle};
     use crate::transport_layer::transport::TcpSteamMaker;
     use crate::transport_layer::Pressure;
     use bytes::Bytes;
@@ -195,14 +178,10 @@ mod test {
 
     use crate::transport_layer::processor::test::tcp_echo_process_listener;
     use std::env;
-    use std::fs::File;
+    use std::io::stdout;
     use std::net::SocketAddr;
     use std::sync::Arc;
-    use std::time::Duration;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
-    use tokio::spawn;
-    use tracing::debug;
 
     #[test]
     fn pressure_echo() {
@@ -222,7 +201,7 @@ mod test {
         let transport_conn = TcpSteamMaker::new("127.0.0.1:8080");
         let processor = Echo::new();
         let pressure = Pressure::new(Arc::new(rt), transport_conn, processor, None);
-        pressure.run()
+        pressure.run(Box::new(stdout()))
     }
 
     #[test]
@@ -241,8 +220,8 @@ mod test {
         rt.spawn(http_server(listener));
 
         let transport_conn = TcpSteamMaker::new("127.0.0.1:3000");
-        let processor = HttpHandle::new("http://127.0.0.1:3000", Empty::<Bytes>::new()).unwrap();
+        let processor = Http1Handle::new("http://127.0.0.1:3000", Empty::<Bytes>::new()).unwrap();
         let pressure = Pressure::new(Arc::new(rt), transport_conn, processor, None);
-        pressure.run()
+        pressure.run(Box::new(stdout()))
     }
 }
