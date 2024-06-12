@@ -10,6 +10,8 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use std::time::Duration;
+use std::{time, vec};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::runtime::Runtime;
@@ -33,12 +35,28 @@ pub trait Processor<C: Conn, S: Display> {
     async fn turn(&self, conn: Rc<RefCell<C>>) -> Result<S>;
 }
 
-pub struct Pressure<T, P, C, S>
+pub trait Stop {
+    fn stop(&mut self) -> bool;
+}
+
+// per conn?
+#[derive(Default)]
+pub struct Statistics {
+    // pull间隔
+    pull_interval: Vec<Duration>,
+    // 每次turn完成花费的时间
+    // 理论上这个的len就是turn的次数
+    turn_speed: Vec<Duration>,
+    // Processor 内输出的信息
+    //turn_collect: Vec<T>,
+}
+
+pub struct Pressure<T, P, C,S>
 where
     C: Conn,
     S: Display,
     T: TransportConn<C>,
-    P: Processor<C, S>,
+    P: Processor<C,S>,
 {
     rt: Arc<Runtime>,
     transport: T,
@@ -65,18 +83,32 @@ where
             status: Default::default(),
         }
     }
-
-    pub fn run(self, _collect: Box<dyn Write>) {
+    pub fn run<S>(self, mut stop: S, _collect: Box<dyn Write>)
+    where
+        S: Stop,
+    {
         let mut connections = HashMap::new();
         let mut pinned_futures = HashMap::new();
         let mut wake_run = HashMap::new();
+        let mut conn_sta = HashMap::new();
         let bitmap = Arc::new(Mutex::new(RoaringBitmap::new()));
         let mut un_use_seq = (0..=self.max).collect::<BTreeSet<u32>>();
         let mut all_conn = 0;
+        let mut begin = time::SystemTime::now();
         loop {
-            info!("all conn{all_conn}, now conn{:}", connections.len());
-            //sleep(Duration::from_secs(2));
-            //connections.len()
+            if stop.stop() {
+                let mut all_connected: usize = 0;
+                let mut all_turn = 0;
+                let mut status: Vec<Statistics> = conn_sta.into_values().flatten().collect();
+                for sta in status {
+                    all_connected += 1;
+                    all_turn += sta.turn_speed.len();
+                }
+                let cost = time::SystemTime::now().duration_since(begin).unwrap();
+                info!("all conn:{all_connected},all req:{all_turn},cost:{cost}");
+                return;
+            }
+            debug!("all conn{all_conn}, now conn{:}", connections.len());
             if connections.len() < self.max as usize {
                 self.rt.block_on(async {
                     match self.transport.new_conn().await {
@@ -89,6 +121,10 @@ where
                                 seq,
                                 futures::task::waker(Arc::new(Wk::new(bitmap.clone(), seq))),
                             );
+                            conn_sta
+                                .entry(seq)
+                                .or_insert(Vec::new())
+                                .push(Statistics::default());
                             all_conn += 1;
                         }
                         Err(_) => {
@@ -201,7 +237,8 @@ mod test {
         let transport_conn = TcpSteamMaker::new("127.0.0.1:8080");
         let processor = Echo::new();
         let pressure = Pressure::new(Arc::new(rt), transport_conn, processor, None);
-        pressure.run(Box::new(stdout()))
+        let a = Arc::new(AtomicBool::new(false));
+        pressure.run(a,Box::new(stdout()))
     }
 
     #[test]
@@ -220,8 +257,9 @@ mod test {
         rt.spawn(http_server(listener));
 
         let transport_conn = TcpSteamMaker::new("127.0.0.1:3000");
-        let processor = Http1Handle::new("http://127.0.0.1:3000", Empty::<Bytes>::new()).unwrap();
+        let processor = HttpHandle::new("http://127.0.0.1:3000", Empty::<Bytes>::new()).unwrap();
         let pressure = Pressure::new(Arc::new(rt), transport_conn, processor, None);
-        pressure.run(Box::new(stdout()))
+        let a = Arc::new(AtomicBool::new(false));
+        pressure.run(a,Box::new(stdout()))
     }
 }

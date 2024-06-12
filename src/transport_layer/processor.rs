@@ -1,36 +1,28 @@
-use super::odd::{Empty, WarpConn};
 use crate::transport_layer::Processor;
-use anyhow::anyhow;
 use hyper::body::Body;
 use hyper::client::conn::http1 as client_http1;
 use hyper::{Request, Uri};
 use hyper_util::rt::TokioIo;
 use std::cell::RefCell;
 use std::error::Error;
-use std::fmt::{Debug, Display, Formatter};
-use std::rc::Rc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::io;
+use std::io::IoSlice;
+use std::ops::DerefMut;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use anyhow::anyhow;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::select;
 use tracing::debug;
 
+#[derive(Default)]
 pub struct Echo {}
 
-impl Default for Echo {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Echo {
-    pub fn new() -> Self {
-        Self {}
-    }
-}
-
-impl Processor<TcpStream, Empty> for Echo {
+impl Processor<TcpStream,Empty> for Echo {
     #[allow(clippy::await_holding_refcell_ref)]
-    async fn turn(&self, conn: Rc<RefCell<TcpStream>>) -> anyhow::Result<Empty> {
+    async fn turn(&self, conn: Arc<RefCell<TcpStream>>) -> anyhow::Result<()> {
         debug!("run turn");
         let mut conn_mut = conn.borrow_mut();
         conn_mut.write_all(b"hello").await?;
