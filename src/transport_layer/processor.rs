@@ -1,18 +1,15 @@
-use crate::transport_layer::Processor;
+use super::odd::{Empty, WarpConn};
+use crate::transport_layer::{Instruct, Processor};
+use anyhow::anyhow;
 use hyper::body::Body;
 use hyper::client::conn::http1 as client_http1;
 use hyper::{Request, Uri};
 use hyper_util::rt::TokioIo;
 use std::cell::RefCell;
 use std::error::Error;
-use std::io;
-use std::io::IoSlice;
-use std::ops::DerefMut;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll};
-use anyhow::anyhow;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use std::fmt::{Debug, Display, Formatter};
+use std::rc::Rc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::select;
 use tracing::debug;
@@ -20,9 +17,9 @@ use tracing::debug;
 #[derive(Default)]
 pub struct Echo {}
 
-impl Processor<TcpStream,Empty> for Echo {
+impl Processor<TcpStream, Empty> for Echo {
     #[allow(clippy::await_holding_refcell_ref)]
-    async fn turn(&self, conn: Arc<RefCell<TcpStream>>) -> anyhow::Result<()> {
+    async fn turn(&self, conn: Rc<RefCell<TcpStream>>) -> anyhow::Result<Empty> {
         debug!("run turn");
         let mut conn_mut = conn.borrow_mut();
         conn_mut.write_all(b"hello").await?;
@@ -72,6 +69,8 @@ impl Display for H1Detail {
     }
 }
 
+impl Instruct for H1Detail {}
+
 // TODO: 扩展processor，让Pressure负责conn的pull
 impl<T> Processor<TcpStream, H1Detail> for Http1Handle<T>
 where
@@ -101,16 +100,17 @@ where
 #[cfg(test)]
 pub mod test {
 
-    use crate::transport_layer::processor::{Http1Handle};
+    use crate::transport_layer::processor::Http1Handle;
     use crate::transport_layer::Processor;
     use http_body_util::{BodyExt, Empty, Full};
     use hyper::body::Bytes;
     use hyper::service::service_fn;
-    use hyper::{client::conn::http1 as client_http1, server::conn::http1 as server_http1};
+    use hyper::{client::conn::http1 as client_http1, server::conn::http1 as server_http1, StatusCode};
     use hyper::{Request, Response};
     use hyper_util::rt::TokioIo;
     use std::cell::RefCell;
     use std::convert::Infallible;
+    use std::net::SocketAddr;
     use std::rc::Rc;
 
     use crate::transport_layer::odd::WarpConn;
@@ -148,6 +148,11 @@ pub mod test {
 
     #[tokio::test]
     async fn tokio() {
+
+        let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+        let listener =  TcpListener::bind(addr).await.unwrap() ;
+        spawn(http_server(listener));
+
         let stream = TcpStream::connect("127.0.0.1:8080").await.unwrap();
         let c = Rc::new(RefCell::new(stream));
         let wc = WarpConn(c);
@@ -165,8 +170,8 @@ pub mod test {
             .unwrap();
         let response = request_sender.send_request(request).await.unwrap();
 
-        dbg!(response.into_body().frame().await);
-        //assert_eq!(response.status(), StatusCode::OK);
+        //dbg!(response.into_body().frame().await);
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     pub async fn tcp_echo_process_listener() {

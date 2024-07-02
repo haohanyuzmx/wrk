@@ -1,3 +1,4 @@
+use crate::transport_layer::Instruct;
 use futures::task::ArcWake;
 use roaring::RoaringBitmap;
 use std::cell::RefCell;
@@ -80,6 +81,7 @@ impl ArcWake for Wk {
     }
 }
 
+#[derive(Default)]
 pub struct Empty;
 
 impl Display for Empty {
@@ -87,3 +89,5 @@ impl Display for Empty {
         write!(f, "EMPTY")
     }
 }
+
+impl Instruct for Empty {}

@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use http_body_util::Empty;
 use std::io::stdout;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::thread;
 
@@ -23,16 +24,18 @@ fn main() {
             .unwrap(),
     );
 
+    let a = Arc::new(AtomicBool::new(false));
     let cpus = num_cpus::get();
     let mut ht = None;
     for _ in 0..cpus - 1 {
         let n_rt = rt.clone();
+        let a_c = a.clone();
         ht = Some(thread::spawn(|| {
             let transport_conn = TcpSteamMaker::new("127.0.0.1:8080");
             let processor =
                 Http1Handle::new("http://127.0.0.1:8080", Empty::<Bytes>::new()).unwrap();
             let pressure = Pressure::new(n_rt, transport_conn, processor, None);
-            pressure.run(Box::new(stdout()));
+            pressure.run(a_c);
         }));
     }
     let _ = ht.unwrap().join();

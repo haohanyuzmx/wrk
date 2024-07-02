@@ -1,4 +1,4 @@
-use crate::transport_layer::{Stop, TransportConn};
+use super::{Instruct, Statistics, Stop, TransportConn};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
@@ -24,7 +24,10 @@ impl TransportConn<TcpStream> for TcpSteamMaker {
 }
 
 impl Stop for Arc<AtomicBool> {
-    fn stop(&mut self) -> bool {
+    fn stop<T>(&mut self, status: &Statistics<T>) -> bool
+    where
+        T: Instruct
+    {
         self.load(Relaxed)
     }
 }
