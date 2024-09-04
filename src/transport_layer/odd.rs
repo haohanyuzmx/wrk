@@ -1,3 +1,4 @@
+use crate::transport_layer::Instruct;
 use futures::task::ArcWake;
 use roaring::RoaringBitmap;
 use std::cell::RefCell;
@@ -11,7 +12,6 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
-use tracing::debug;
 
 pub struct WarpConn(pub Rc<RefCell<TcpStream>>);
 
@@ -75,11 +75,11 @@ impl Wk {
 
 impl ArcWake for Wk {
     fn wake_by_ref(arc_self: &Arc<Self>) {
-        debug!("been call wake {}", arc_self.index);
         arc_self.bitmap.lock().unwrap().insert(arc_self.index);
     }
 }
 
+#[derive(Default)]
 pub struct Empty;
 
 impl Display for Empty {
@@ -87,3 +87,5 @@ impl Display for Empty {
         write!(f, "EMPTY")
     }
 }
+
+impl Instruct for Empty {}
